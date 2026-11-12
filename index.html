@@ -1,0 +1,744 @@
+{
+    throw new Error("融資融券資料回傳 0 筆，請稍後再刷新。");
+  }
+ 
+  const marginData = sortedByDate(marginRows.filter(isMarginRow));
+  const shortData = sortedByDate(marginRows.filter(isShortRow));
+ 
+  if (marginData.length === 0 || shortData.length === 0) {
+    const names = [...new Set(marginRows.map(row => row.name))]
+      .map(value => String(value))
+      .join("、");
+ 
+    console.error("融資融券 API 範例資料：", marginRows.slice(0, 10));
+ 
+    throw new Error(
+      `無法從 name 欄位辨認融資或融券。API 回傳的 name 值：${names || "空白"}`
+    );
+  }
+ 
+  createLineChart(
+    "marginChart",
+    marginData.map(row => row.date),
+    [{
+      label: "融資餘額",
+      data: marginData.map(getTodayBalance),
+      color: "#55d6a2"
+    }],
+    "API 原始單位"
+  );
+ 
+  createLineChart(
+    "shortChart",
+    shortData.map(row => row.date),
+    [{
+      label: "融券餘額",
+      data: shortData.map(getTodayBalance),
+      color: "#7aa7ff"
+    }],
+    "API 原始單位"
+  );
+ 
+  /* 三大法人分類 */
+  const netByDate = {};
+ 
+  function getMarketInvestorCategory(name) {
+    const value = normalizeName(name);
+ 
+    if (
+      value.includes("foreigndealer") ||
+      value.includes("外資自營商")
+    ) {
+      return null;
+    }
+ 
+    if (
+      value.includes("investmenttrust") ||
+      value.includes("投信")
+    ) {
+      return "投信";
+    }
+ 
+    if (
+      value.includes("dealer") ||
+      value.includes("自營")
+    ) {
+      return "自營商";
+    }
+ 
+    if (
+      value.includes("foreigninvestor") ||
+      value.includes("外資") ||
+      value.includes("陸資")
+    ) {
+      return "外資";
+    }
+ 
+    return null;
+  }
+ 
+  for (const row of institutionalRows) {
+    const name =
+      row.name ||
+      row.type ||
+      row.institutional_investors ||
+      "";
+ 
+    const category = getMarketInvestorCategory(name);
+ 
+    if (!category || !row.date) continue;
+ 
+    const difference = findField(row, [
+      /^difference$/i,
+      /^diff$/i,
+      /買賣差額/,
+      /買賣超/
+    ]);
+ 
+    const buy = findField(row, [
+      /^buy$/i,
+      /買進金額/,
+      /買進/
+    ]);
+ 
+    const sell = findField(row, [
+      /^sell$/i,
+      /賣出金額/,
+      /賣出/
+    ]);
+ 
+    const net = difference !== null
+      ? toNumber(difference)
+      : toNumber(buy) - toNumber(sell);
+ 
+    if (!netByDate[row.date]) {
+      netByDate[row.date] = {
+        外資: 0,
+        自營商: 0,
+        投信: 0
+      };
+    }
+ 
+    netByDate[row.date][category] += net;
+  }
+ 
+  const institutionalDates = Object.keys(netByDate).sort();
+ 
+  if (institutionalDates.length > 0) {
+    const categories = ["外資", "自營商", "投信"];
+    const colors = ["#55d6a2", "#ffb86b", "#7aa7ff"];
+ 
+    createLineChart(
+      "marketInstChart",
+      institutionalDates,
+      categories.map((category, index) => ({
+        label: category,
+        data: institutionalDates.map(
+          date => netByDate[date][category] / 100000000
+        ),
+        color: colors[index]
+      })),
+      "億元"
+    );
+  } else {
+    createEmptyChart(
+      "marketInstChart",
+      "目前沒有可辨識的法人資料"
+    );
+ 
+    console.warn(
+      "整體法人 API 資料範例：",
+      institutionalRows.slice(0, 10)
+    );
+  }
+}
+ 
+/* 台指期 TX 三大法人空單未平倉口數趨勢 */
+async function loadFuturesShortChart() {
+  try {
+    const rows = await fetchDataset(
+      "TaiwanFuturesInstitutionalInvestors",
+      twoMonthsAgo,
+      endDate,
+      "TX"
+    );
+ 
+    if (rows.length === 0) {
+      throw new Error("API 沒有回傳台指期資料，請稍後再試。");
+    }
+ 
+    function getFuturesInvestorCategory(row) {
+      const rawName =
+        row.institutional_investors ||
+        row.name ||
+        row.type ||
+        "";
+ 
+      const name = normalizeName(rawName);
+ 
+      if (
+        name.includes("foreigndealer") ||
+        name.includes("外資自營商")
+      ) {
+        return null;
+      }
+ 
+      if (
+        name.includes("foreigninvestor") ||
+        name.includes("外資") ||
+        name.includes("陸資")
+      ) {
+        return "外資";
+      }
+ 
+      if (
+        name.includes("investmenttrust") ||
+        name.includes("投信")
+      ) {
+        return "投信";
+      }
+ 
+      if (
+        name.includes("dealer") ||
+        name.includes("自營")
+      ) {
+        return "自營商";
+      }
+ 
+      return null;
+    }
+ 
+    function getShortOpenInterest(row) {
+      const keys = Object.keys(row);
+ 
+      const exactKey = keys.find(key => {
+        const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+ 
+        return normalized === "shortopeninterestbalancevolume";
+      });
+ 
+      if (exactKey) {
+        return toNumber(row[exactKey]);
+      }
+ 
+      const fallbackKey = keys.find(key => {
+        const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+ 
+        return normalized.includes("short") &&
+          normalized.includes("openinterest") &&
+          normalized.includes("volume") &&
+          !normalized.includes("amount");
+      });
+ 
+      if (fallbackKey) {
+        return toNumber(row[fallbackKey]);
+      }
+ 
+      return null;
+    }
+ 
+    const byDate = {};
+ 
+    for (const row of rows) {
+      if (!row.date) continue;
+ 
+      const category = getFuturesInvestorCategory(row);
+      if (!category) continue;
+ 
+      const shortOpenInterest = getShortOpenInterest(row);
+ 
+      if (shortOpenInterest === null) {
+        throw new Error(
+          `找不到空單未平倉口數欄位。API 回傳欄位：${Object.keys(row).join(", ")}`
+        );
+      }
+ 
+      if (!byDate[row.date]) {
+        byDate[row.date] = {
+          外資: 0,
+          自營商: 0,
+          投信: 0
+        };
+      }
+ 
+      byDate[row.date][category] += shortOpenInterest;
+    }
+ 
+    const dates = Object.keys(byDate).sort();
+ 
+    if (dates.length === 0) {
+      throw new Error(
+        "有取得期貨資料，但無法辨認外資、自營商或投信分類。"
+      );
+    }
+ 
+    const categories = ["外資", "自營商", "投信"];
+    const colors = ["#55d6a2", "#ffb86b", "#7aa7ff"];
+ 
+    const datasets = categories.map((category, index) => ({
+      label: category,
+      data: dates.map(date => byDate[date][category]),
+      color: colors[index]
+    }));
+ 
+    datasets.push({
+      label: "三大法人合計",
+      data: dates.map(date =>
+        byDate[date].外資 +
+        byDate[date].自營商 +
+        byDate[date].投信
+      ),
+      color: "#f472b6"
+    });
+ 
+    createLineChart(
+      "futuresShortChart",
+      dates,
+      datasets,
+      "口"
+    );
+ 
+    $("futuresShortNote").textContent =
+      "TX 台指期｜三大法人空單未平倉口數，單位：口";
+  } catch (error) {
+    console.error("台指期空單圖表讀取失敗：", error);
+ 
+    createEmptyChart(
+      "futuresShortChart",
+      "台指期資料讀取失敗"
+    );
+ 
+    $("futuresShortNote").textContent =
+      `讀取失敗：${error.message}`;
+  }
+}
+ 
+/* 判斷個股法人類型 */
+function getInvestorType(name) {
+  const value = String(name || "");
+ 
+  if (/Foreign_Dealer|外資自營商/i.test(value)) return null;
+  if (/Investment|投信/i.test(value)) return "投信";
+  if (/Dealer|自營/i.test(value)) return "自營商";
+  if (/Foreign|外資|陸資/i.test(value)) return "外資";
+ 
+  return null;
+}
+ 
+/* 讀取個股融資餘額欄位 */
+function getStockMarginBalance(row) {
+  if (!row) return null;
+ 
+  const keys = Object.keys(row);
+ 
+  const exactKey = keys.find(key => {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+ 
+    return normalized === "marginpurchasetodaybalance";
+  });
+ 
+  if (exactKey) {
+    return toNumber(row[exactKey]);
+  }
+ 
+  const fallbackKey = keys.find(key => {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+ 
+    return normalized.includes("marginpurchase") &&
+      normalized.includes("todaybalance");
+  });
+ 
+  if (fallbackKey) {
+    return toNumber(row[fallbackKey]);
+  }
+ 
+  const chineseKey = keys.find(key =>
+    /融資.*今日餘額/.test(key)
+  );
+ 
+  if (chineseKey) {
+    return toNumber(row[chineseKey]);
+  }
+ 
+  return null;
+}
+ 
+/* 讀取一檔個股的法人買賣、月營收及融資餘額 */
+async function loadOneStock(code) {
+  const [institutionRows, revenueRows, marginRows, priceRows] =
+    await Promise.all([
+      fetchDataset(
+        "TaiwanStockInstitutionalInvestorsBuySell",
+        oneMonthAgo,
+        endDate,
+        code
+      ),
+ 
+      fetchDataset(
+        "TaiwanStockMonthRevenue",
+        oneYearAgo,
+        endDate,
+        code
+      ),
+ 
+      fetchDataset(
+        "TaiwanStockMarginPurchaseShortSale",
+        twoMonthsAgo,
+        endDate,
+        code
+      ),
+ 
+      // 近半年每日股價
+      fetchDataset(
+        "TaiwanStockPrice",
+        sixMonthsAgo,
+        endDate,
+        code
+      )
+    ]);
+ 
+  const byDate = {};
+ 
+  for (const row of institutionRows) {
+    const name =
+      row.name ||
+      row.type ||
+      row.institutional_investors ||
+      "";
+ 
+    const category = getInvestorType(name);
+ 
+    if (!category || !row.date) continue;
+ 
+    if (!byDate[row.date]) {
+      byDate[row.date] = {
+        外資: 0,
+        投信: 0,
+        自營商: 0
+      };
+    }
+ 
+    const difference = findField(row, [
+      /^difference$/i,
+      /^diff$/i,
+      /買賣超股數/,
+      /買賣超/
+    ]);
+ 
+    const buy = findField(row, [
+      /^buy$/i,
+      /買進股數/,
+      /買進/
+    ]);
+ 
+    const sell = findField(row, [
+      /^sell$/i,
+      /賣出股數/,
+      /賣出/
+    ]);
+ 
+    const netShares = difference !== null
+      ? toNumber(difference)
+      : toNumber(buy) - toNumber(sell);
+ 
+    // 股數換算成張數
+    byDate[row.date][category] += netShares / 1000;
+  }
+ 
+  const marginData = sortedByDate(
+    marginRows
+      .map(row => ({
+        date: row.date,
+        balance: getStockMarginBalance(row)
+      }))
+      .filter(row => row.date && row.balance !== null)
+  );
+ 
+  const prices = sortedByDate(
+    priceRows.filter(row =>
+      row.date &&
+      row.close !== null &&
+      row.close !== undefined
+    )
+  );
+ 
+  return {
+    code,
+    dates: Object.keys(byDate).sort(),
+    byDate,
+    revenues: sortedByDate(revenueRows),
+    marginData,
+    prices
+  };
+}
+ 
+ 
+function destroyStockCharts() {
+  for (const id of Object.keys(chartInstances)) {
+if (
+  id.startsWith("inst-") ||
+  id.startsWith("margin-stock-") ||
+  id.startsWith("revenue-") ||
+  id.startsWith("price-")
+)
+{
+      chartInstances[id].destroy();
+      delete chartInstances[id];
+    }
+  }
+}
+ 
+/* 讀取並繪製所有自選股 */
+async function loadStockCharts() {
+  destroyStockCharts();
+ 
+  const codes = [
+    ...new Set(
+      [...$("stockInputs").query
+
+SelectorAll("input")]
+        .map(input => input.value.trim())
+        .filter(Boolean)
+    )
+  ];
+ 
+  $("stockResults").innerHTML = "";
+ 
+  if (codes.length === 0) {
+    return;
+  }
+ 
+  const results = [];
+  let nextIndex = 0;
+ 
+  // 同時最多處理 4 檔，降低同時發出的 API 請求數
+  async function worker() {
+    while (nextIndex < codes.length) {
+      const code = codes[nextIndex++];
+ 
+      try {
+        results.push(await loadOneStock(code));
+      } catch (error) {
+        results.push({
+          code,
+          error: error.message
+        });
+      }
+    }
+  }
+ 
+  const workerCount = Math.min(4, codes.length);
+ 
+  await Promise.all(
+    Array.from({ length: workerCount }, () => worker())
+  );
+ 
+  results.sort((a, b) =>
+    codes.indexOf(a.code) - codes.indexOf(b.code)
+  );
+ 
+  for (const item of results) {
+    const card = document.createElement("article");
+    card.className = "stock-card";
+ 
+    const heading = document.createElement("h2");
+    heading.textContent = item.code;
+    card.appendChild(heading);
+ 
+    if (item.error) {
+      const errorElement = document.createElement("div");
+      errorElement.className = "error";
+      errorElement.textContent = `載入失敗：${item.error}`;
+      card.appendChild(errorElement);
+      $("stockResults").appendChild(card);
+      continue;
+    }
+ 
+    const chartsBox = document.createElement("div");
+    chartsBox.className = "stock-charts";
+/* 個股近半年每日收盤價圖 */
+const priceBlock = document.createElement("div");
+ 
+const priceLabel = document.createElement("div");
+priceLabel.className = "muted";
+priceLabel.textContent = "近半年每日收盤價";
+ 
+const priceChartBox = document.createElement("div");
+priceChartBox.className = "chart-box";
+ 
+const priceCanvas = document.createElement("canvas");
+priceCanvas.id = `price-${item.code}`;
+ 
+priceChartBox.appendChild(priceCanvas);
+priceBlock.append(priceLabel, priceChartBox);
+ 
+ 
+    /* 個股三大法人圖 */
+    const investorBlock = document.createElement("div");
+ 
+    const investorLabel = document.createElement("div");
+    investorLabel.className = "muted";
+    investorLabel.textContent = "近一個月法人買賣超（張）";
+ 
+    const investorChartBox = document.createElement("div");
+    investorChartBox.className = "chart-box";
+ 
+    const investorCanvas = document.createElement("canvas");
+    investorCanvas.id = `inst-${item.code}`;
+ 
+    investorChartBox.appendChild(investorCanvas);
+    investorBlock.append(investorLabel, investorChartBox);
+ 
+    /* 個股融資餘額圖 */
+    const marginBlock = document.createElement("div");
+ 
+    const marginLabel = document.createElement("div");
+    marginLabel.className = "muted";
+    marginLabel.textContent = "近兩個月融資餘額（張）";
+ 
+    const marginChartBox = document.createElement("div");
+    marginChartBox.className = "chart-box";
+ 
+    const marginCanvas = document.createElement("canvas");
+    marginCanvas.id = `margin-stock-${item.code}`;
+ 
+    marginChartBox.appendChild(marginCanvas);
+    marginBlock.append(marginLabel, marginChartBox);
+ 
+    /* 個股月營收圖 */
+    const revenueBlock = document.createElement("div");
+ 
+    const revenueLabel = document.createElement("div");
+    revenueLabel.className = "muted";
+    revenueLabel.textContent = "近一年月營收（億元）";
+ 
+    const revenueChartBox = document.createElement("div");
+    revenueChartBox.className = "chart-box";
+ 
+    const revenueCanvas = document.createElement("canvas");
+    revenueCanvas.id = `revenue-${item.code}`;
+ 
+    revenueChartBox.appendChild(revenueCanvas);
+    revenueBlock.append(revenueLabel, revenueChartBox);
+ 
+    chartsBox.append(
+  priceBlock,
+  investorBlock,
+  marginBlock,
+  revenueBlock
+);
+ 
+ 
+    card.appendChild(chartsBox);
+    $("stockResults").appendChild(card);
+/* 畫近半年每日收盤價 */
+if (item.prices.length > 0) {
+  createLineChart(
+    priceCanvas.id,
+    item.prices.map(row => row.date),
+    [{
+      label: "每日收盤價",
+      data: item.prices.map(row => toNumber(row.close)),
+      color: "#f472b6"
+    }],
+    "元"
+  );
+} else {
+  createEmptyChart(
+    priceCanvas.id,
+    "沒有每日股價資料"
+  );
+}
+ 
+    /* 畫個股法人買賣超 */
+    createLineChart(
+      investorCanvas.id,
+      item.dates,
+      ["外資", "投信", "自營商"].map((category, index) => ({
+        label: category,
+        data: item.dates.map(date => item.byDate[date][category]),
+        color: ["#55d6a2", "#7aa7ff", "#ffb86b"][index]
+      })),
+      "張"
+    );
+ 
+    /* 畫個股融資餘額 */
+    if (item.marginData.length > 0) {
+      createLineChart(
+        marginCanvas.id,
+        item.marginData.map(row => row.date),
+        [{
+          label: "融資餘額",
+          data: item.marginData.map(row => row.balance),
+          color: "#55d6a2"
+        }],
+        "張"
+      );
+    } else {
+      createEmptyChart(
+        marginCanvas.id,
+        "沒有融資餘額資料"
+      );
+    }
+ 
+    /* 畫個股月營收 */
+    const firstRevenue = item.revenues[0] || {};
+ 
+    const revenueKey =
+      Object.keys(firstRevenue).find(key => /^revenue$/i.test(key)) ||
+      Object.keys(firstRevenue).find(key => /營收/.test(key)) ||
+      Object.keys(firstRevenue).find(key => /^value$/i.test(key));
+ 
+    if (revenueKey) {
+      createLineChart(
+        revenueCanvas.id,
+        item.revenues.map(row => row.date),
+        [{
+          label: "月營收",
+          data: item.revenues.map(
+            row => toNumber(row[revenueKey]) / 100000000
+          ),
+          color: "#e879f9"
+        }],
+        "億元"
+      );
+    } else {
+      createEmptyChart(
+        revenueCanvas.id,
+        "找不到營收欄位"
+      );
+ 
+      console.warn(
+        `${item.code} 月營收資料欄位：`,
+        Object.keys(firstRevenue)
+      );
+    }
+  }
+}
+ 
+/* 按刷新後載入所有圖表 */
+$("refresh").addEventListener("click", async () => {
+  $("refresh").disabled = true;
+  $("status").textContent = "資料讀取中…";
+ 
+  try {
+    await loadFuturesShortChart();
+    await loadMarketCharts();
+    await loadStockCharts();
+ 
+    $("refreshTime").textContent =
+      `刷新時間：${new Date().toLocaleString("zh-TW")}`;
+ 
+    $("status").textContent = "資料更新完成";
+  } catch (error) {
+    console.error(error);
+    $("status").textContent = `讀取失敗：${error.message}`;
+  } finally {
+    $("refresh").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
+
+
