@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>台股籌碼與營收儀表板</title>
+ 
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+ 
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+ 
+    body {
+      margin: 0;
+      background: #0b1220;
+      color: #e8eef9;
+      font-family: system-ui, -apple-system, "Noto Sans TC", sans-serif;
+    }
+ 
+    main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+ 
+    h1 {
+      font-size: 24px;
+      margin: 0 0 8px;
+    }
+ 
+    h2 {
+      font-size: 18px;
+      margin: 0 0 14px;
+    }
+ 
+    .muted {
+      color: #9aa9bf;
+      font-size: 13px;
+    }
+ 
+    .toolbar,
+    .panel,
+    .stock-card {
+      background: #121c2e;
+      border: 1px solid #23314a;
+      border-radius: 14px;
+      padding: 16px;
+    }
+ 
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 18px 0;
+    }
+ 
+    input {
+      background: #0b1220;
+      color: #e8eef9;
+      border: 1px solid #33445f;
+      border-radius: 8px;
+      padding: 10px;
+    }
+ 
+    #token {
+      width: min(360px, 100%);
+    }
+ 
+    button {
+      background: #55d6a2;
+      color: #062318;
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+ 
+    button:disabled {
+      opacity: .55;
+      cursor: wait;
+    }
+ 
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+      margin: 14px 0 24px;
+    }
+ 
+    .chart-box {
+      height: 260px;
+      position: relative;
+    }
+ 
+    .stock-inputs {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+      gap: 8px;
+      margin: 12px 0;
+    }
+ 
+    .stock-inputs input {
+      width: 100%;
+    }
+ 
+    .stock-card {
+      margin: 12px 0;
+    }
+ 
+    .stock-charts {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 12px;
+    }
+ 
+    .error {
+      color: #ff9b9b;
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-wrap: anywhere;
+    }
+ 
+    .status {
+      min-height: 20px;
+      overflow-wrap: anywhere;
+    }
+ 
+    @media (max-width: 600px) {
+      main {
+        padding: 14px;
+      }
+ 
+      .chart-box {
+        height: 230px;
+      }
+    }
+  </style>
+</head>
+ 
+<body>
+<main>
+  <h1>台股籌碼與營收儀表板</h1>
+  <div class="muted">市場籌碼趨勢｜自選股法人買賣｜融資餘額｜個股月營收｜台指期空單</div>
+ 
+  <div class="toolbar">
+    <label>
+      FinMind Token（選填）
+      <input
+        id="token"
+        type="password"
+        autocomplete="off"
+        placeholder="可留白；Token 不會儲存"
+      >
+    </label>
+ 
+    <button id="refresh">刷新資料</button>
+    <span id="refreshTime" class="muted">尚未刷新</span>
+    <span id="status" class="muted status"></span>
+  </div>
+ 
+  <section class="grid">
+    <article class="panel">
+      <h2>近兩個月融資餘額</h2>
+      <div class="chart-box">
+        <canvas id="marginChart"></canvas>
+      </div>
+    </article>
+ 
+    <article class="panel">
+      <h2>近兩個月融券餘額</h2>
+      <div class="chart-box">
+        <canvas id="shortChart"></canvas>
+      </div>
+    </article>
+ 
+    <article class="panel">
+      <h2>近兩個月三大法人整體買賣超</h2>
+      <div class="chart-box">
+        <canvas id="marketInstChart"></canvas>
+      </div>
+    </article>
+ 
+    <article class="panel">
+      <h2>近兩個月台指期三大法人空單未平倉口數</h2>
+      <div id="futuresShortNote" class="muted">
+        商品：TX 台指期｜單位：口
+      </div>
+      <div class="chart-box">
+        <canvas id="futuresShortChart"></canvas>
+      </div>
+    </article>
+  </section>
+ 
+  <section class="panel">
+    <h2>自選股票（最多 20 檔）</h2>
+    <div class="muted">
+      輸入股票代碼後按「刷新資料」。個股法人買賣超以張顯示，融資餘額以張顯示，月營收以億元顯示。
+    </div>
+ 
+    <div id="stockInputs" class="stock-inputs"></div>
+    <div id="stockResults"></div>
+  </section>
+</main>
+ 
+<script>
+"use strict";
+ 
+const API_URL = "https://api.finmindtrade.com/api/v4/data";
+const chartInstances = {};
+ 
+const $ = id => document.getElementById(id);
+ 
+function formatDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+ 
+function monthsAgo(months) {
+  const date = new Date();
+  date.setMonth(date.getMonth() - months);
+  return formatDate(date);
+}
+ 
+const endDate = formatDate(new Date());
+const sixMonthsAgo = monthsAgo(6);
+const twoMonthsAgo = monthsAgo(2);
+const oneMonthAgo = monthsAgo(1);
+const oneYearAgo = monthsAgo(12);
+ 
+ 
+/* 建立 20 個自選股輸入欄位，並保存股票代碼 */
+for (let i = 1; i <= 20; i++) {
+  const input = document.createElement("input");
+ 
+  input.placeholder = `股票代碼 ${String(i).padStart(2, "0")}`;
+  input.maxLength = 6;
+  input.value = localStorage.getItem(`stock${i}`) || "";
+ 
+  input.addEventListener("input", () => {
+    localStorage.setItem(`stock${i}`, input.value.trim());
+  });
+ 
+  $("stockInputs").appendChild(input);
+}
+ 
+/* 從 FinMind API 取得資料 */
+async function fetchDataset(dataset, startDate, finishDate, dataId = "") {
+  const params = new URLSearchParams({
+    dataset,
+    start_date: startDate,
+    end_date: finishDate
+  });
+ 
+  if (dataId) {
+    params.set("data_id", dataId);
+  }
+ 
+  const headers = {};
+  const token = $("token").value.trim();
+ 
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+ 
+  let response;
+ 
+  try {
+    response = await fetch(`${API_URL}?${params.toString()}`, { headers });
+  } catch {
+    throw new Error(
+      "連線 API 失敗。請確認網路正常，並使用 Chrome、Edge 或 Safari 開啟。"
+    );
+  }
+ 
+  if (!response.ok) {
+    throw new Error(`API HTTP ${response.status}`);
+  }
+ 
+  let result;
+ 
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error("API 回傳的內容不是有效 JSON。");
+  }
+ 
+  if (Number(result.status) !== 200) {
+    throw new Error(result.msg || `API 狀態碼：${result.status}`);
+  }
+ 
+  if (!Array.isArray(result.data)) {
+    throw new Error(`「${dataset}」回傳格式不是資料列表。`);
+  }
+ 
+  return result.data;
+}
+ 
+function toNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+ 
+function sortedByDate(rows) {
+  return [...rows].sort((a, b) =>
+    String(a.date || "").localeCompare(String(b.date || ""))
+  );
+}
+ 
+/* 按欄位名稱尋找資料；找不到會回傳 null */
+function findField(row, patterns) {
+  if (!row) return null;
+ 
+  const keys = Object.keys(row);
+ 
+  for (const pattern of patterns) {
+    const foundKey = keys.find(key => pattern.test(key));
+ 
+    if (foundKey) {
+      return row[foundKey];
+    }
+  }
+ 
+  return null;
+}
+ 
+/* 融資融券資料的餘額欄位 */
+function getTodayBalance(row) {
+  if (!row) return 0;
+ 
+  if (row.TodayBalance !== undefined) {
+    return toNumber(row.TodayBalance);
+  }
+ 
+  const key = Object.keys(row).find(name => {
+    const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return normalized.includes("todaybalance");
+  });
+ 
+  if (key) {
+    return toNumber(row[key]);
+  }
+ 
+  const fallbackKey = Object.keys(row).find(name => {
+    const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+ 
+    return normalized.includes("balance") &&
+      !normalized.includes("ysbalance") &&
+      !normalized.includes("yesbalance") &&
+      !normalized.includes("yesterday");
+  });
+ 
+  return fallbackKey ? toNumber(row[fallbackKey]) : 0;
+}
+ 
+/* 建立折線圖 */
+function createLineChart(canvasId, labels, datasets, unitLabel) {
+  if (chartInstances[canvasId]) {
+    chartInstances[canvasId].destroy();
+  }
+ 
+  chartInstances[canvasId] = new Chart($(canvasId), {
+    type: "line",
+ 
+    data: {
+      labels,
+      datasets: datasets.map((dataset, index) => ({
+        ...dataset,
+        borderColor: dataset.color ||
+          ["#55d6a2", "#7aa7ff", "#ffb86b", "#e879f9"][index % 4],
+        backgroundColor: "transparent",
+        borderWidth: 2,
+        tension: 0.25,
+        pointRadius: 2
+      }))
+    },
+ 
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+ 
+      interaction: {
+        mode: "index",
+        intersect: false
+      },
+ 
+      plugins: {
+        legend: {
+          labels: {
+            color: "#dbe5f5"
+          }
+        },
+ 
+        tooltip: {
+          callbacks: {
+            label: context =>
+              `${context.dataset.label}: ${
+                Number(context.raw).toLocaleString()
+              } ${unitLabel}`
+          }
+        }
+      },
+ 
+      scales: {
+        x: {
+          ticks: {
+            color: "#9aa9bf",
+            maxTicksLimit: 9
+          },
+          grid: {
+            color: "#23314a"
+          }
+        },
+ 
+        y: {
+          title: {
+            display: Boolean(unitLabel),
+            text: unitLabel,
+            color: "#9aa9bf"
+          },
+          ticks: {
+            color: "#9aa9bf"
+          },
+          grid: {
+            color: "#23314a"
+          }
+        }
+      }
+    }
+  });
+}
+ 
+function createEmptyChart(canvasId, message) {
+  createLineChart(
+    canvasId,
+    [],
+    [{
+      label: message,
+      data: [],
+      color: "#ffb86b"
+    }],
+    ""
+  );
+}
+ 
+/* 整理 name 欄位，方便辨認融資融券類型 */
+function normalizeName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\s_-]/g, "");
+}
+ 
+function isMarginRow(row) {
+  const name = normalizeName(row.name);
+ 
+  const isMargin =
+    name.includes("融資") ||
+    name.includes("marginpurchase");
+ 
+  const isShort =
+    name.includes("融券") ||
+    name.includes("shortsale");
+ 
+  const isMoneyRow =
+    name.includes("金額") ||
+    name.includes("仟元") ||
+    name.includes("amount") ||
+    name.includes("money");
+ 
+  return isMargin && !isShort && !isMoneyRow;
+}
+ 
+function isShortRow(row) {
+  const name = normalizeName(row.name);
+ 
+  return name.includes("融券") ||
+    name.includes("shortsale");
+}
+ 
+/* 讀取市場整體融資、融券及三大法人資料 */
+async function loadMarketCharts() {
+  const [marginRows, institutionalRows] = await Promise.all([
+    fetchDataset(
+      "TaiwanStockTotalMarginPurchaseShortSale",
+      twoMonthsAgo,
+      endDate
+    ),
+ 
+    fetchDataset(
+      "TaiwanStockTotalInstitutionalInvestors",
+      twoMonthsAgo,
+      endDate
+    )
+  ]);
+ 
+  if (marginRows.length === 0) 
