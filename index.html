@@ -193,7 +193,7 @@
 <main>
   <h1>台股籌碼與營收儀表板</h1>
   <div class="muted">
-    市場籌碼趨勢｜大盤與櫃買指數｜自選股法人買賣｜融資餘額｜月營收｜台指期空單
+    市場籌碼趨勢｜大盤與櫃買指數｜新臺幣匯率｜自選股法人買賣｜融資餘額｜月營收｜台指期空單
   </div>
 
  
@@ -218,7 +218,7 @@
 
  
 
-  <!-- 大盤與櫃買指數 -->
+  <!-- 大盤、櫃買與匯率 -->
   <section class="grid">
     <article class="panel">
       <h2>近半年台灣加權股價指數趨勢</h2>
@@ -239,6 +239,18 @@
       </div>
       <div class="chart-box">
         <canvas id="otcChart"></canvas>
+      </div>
+    </article>
+
+ 
+
+    <article class="panel">
+      <h2>近半年美元兌新臺幣匯率趨勢</h2>
+      <div id="fxNote" class="muted">
+        每日參考匯率｜NTD/USD（1 美元兌新臺幣）
+      </div>
+      <div class="chart-box">
+        <canvas id="fxChart"></canvas>
       </div>
     </article>
   </section>
@@ -269,6 +281,18 @@
       <h2>近兩個月三大法人整體買賣超</h2>
       <div class="chart-box">
         <canvas id="marketInstChart"></canvas>
+      </div>
+    </article>
+
+ 
+
+    <article class="panel">
+      <h2>近半年台股成交量</h2>
+      <div id="volumeNote" class="muted">
+        證交所上市市場成交股數｜單位：億股
+      </div>
+      <div class="chart-box">
+        <canvas id="marketVolumeChart"></canvas>
       </div>
     </article>
 
@@ -629,7 +653,7 @@ function getTodayBalance(row) {
 
  
 
-/* 建立折線圖或混合圖 */
+/* 建立折線圖或柱狀圖 */
 function createLineChart(
   canvasId,
   labels,
@@ -727,6 +751,7 @@ function createLineChart(
         y: {
           type: "linear",
           position: "left",
+          beginAtZero: chartOptions.beginAtZero ?? false,
           title: {
             display: Boolean(chartOptions.yAxisTitle || unitLabel),
             text: chartOptions.yAxisTitle || unitLabel,
@@ -829,6 +854,209 @@ function isShortRow(row) {
 
   return name.includes("融券") ||
     name.includes("shortsale");
+}
+
+ 
+
+ 
+
+/* 從證交所取得近半年每日上市成交股數 */
+async function fetchMarketVolumeRows() {
+  const [startYear, startMonth] = sixMonthsAgo
+    .split("-")
+    .map(Number);
+
+ 
+
+  const [endYear, endMonth] = endDate
+    .split("-")
+    .map(Number);
+
+ 
+
+  const months = [];
+  const cursor = new Date(startYear, startMonth - 1, 1);
+  const lastMonth = new Date(endYear, endMonth - 1, 1);
+
+ 
+
+  while (cursor <= lastMonth) {
+    months.push({
+      year: cursor.getFullYear(),
+      month: cursor.getMonth() + 1
+    });
+
+ 
+
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+ 
+
+  const monthlyRows = await Promise.all(
+    months.map(async ({ year, month }) => {
+      const monthText = String(month).padStart(2, "0");
+      const queryDate = `${year}${monthText}01`;
+
+ 
+
+      const url =
+        "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK" +
+        `?date=${queryDate}&response=json`;
+
+ 
+
+      let response;
+
+ 
+
+      try {
+        response = await fetch(url, { cache: "no-store" });
+      } catch {
+        throw new Error(
+          "無法連線證交所成交量 API。請確認網路連線，或稍後再試。"
+        );
+      }
+
+ 
+
+      if (!response.ok) {
+        throw new Error(`證交所成交量 API HTTP ${response.status}`);
+      }
+
+ 
+
+      let result;
+
+ 
+
+      try {
+        result = await response.json();
+      } catch {
+        throw new Error("證交所成交量 API 回傳的內容不是有效 JSON。");
+      }
+
+ 
+
+      if (result.stat !== "OK" || !Array.isArray(result.data)) {
+        throw new Error(
+          result.stat || `${year}-${monthText} 成交量資料格式不正確。`
+        );
+      }
+
+ 
+
+      return result.data.map(columns => {
+        /*
+         * FMTQIK 欄位：
+         * [0] 日期、[1] 成交股數、[2] 成交金額、
+         * [3] 成交筆數、[4] 發行量加權股價指數、[5] 漲跌點數
+         */
+        const rocDate = String(columns[0] || "");
+        const [rocYear, dateMonth, day] = rocDate
+          .split("/")
+          .map(Number);
+
+ 
+
+        if (!rocYear || !dateMonth || !day) {
+          return null;
+        }
+
+ 
+
+        const date =
+          `${rocYear + 1911}-` +
+          `${String(dateMonth).padStart(2, "0")}-` +
+          `${String(day).padStart(2, "0")}`;
+
+ 
+
+        const volume = Number(
+          String(columns[1] || "").replace(/,/g, "")
+        );
+
+ 
+
+        if (!Number.isFinite(volume) || volume < 0) {
+          return null;
+        }
+
+ 
+
+        return { date, volume };
+      });
+    })
+  );
+
+ 
+
+  return monthlyRows
+    .flat()
+    .filter(row =>
+      row &&
+      row.date >= sixMonthsAgo &&
+      row.date <= endDate
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+ 
+
+ 
+
+/* 載入並繪製近半年台股成交量柱狀圖 */
+async function loadMarketVolumeChart() {
+  try {
+    const rows = await fetchMarketVolumeRows();
+
+ 
+
+    if (rows.length === 0) {
+      throw new Error("證交所 API 沒有回傳近半年成交量資料。");
+    }
+
+ 
+
+    createLineChart(
+      "marketVolumeChart",
+      rows.map(row => row.date),
+      [{
+        type: "bar",
+        label: "上市成交量",
+        data: rows.map(row => row.volume / 100000000),
+        color: "rgba(85, 214, 162, 0.85)",
+        backgroundColor: "rgba(85, 214, 162, 0.5)",
+        borderColor: "rgba(85, 214, 162, 0.9)",
+        unit: "億股"
+      }],
+      "億股",
+      {
+        chartType: "bar",
+        yAxisTitle: "成交量（億股）",
+        beginAtZero: true
+      }
+    );
+
+ 
+
+    $("volumeNote").textContent =
+      "近半年｜資料來源：證交所每日市場成交資訊｜上市市場成交股數，單位：億股";
+  } catch (error) {
+    console.error("台股成交量圖表讀取失敗：", error);
+
+ 
+
+    createEmptyChart(
+      "marketVolumeChart",
+      "成交量資料讀取失敗"
+    );
+
+ 
+
+    $("volumeNote").textContent =
+      `讀取失敗：${error.message}`;
+  }
 }
 
  
@@ -971,7 +1199,9 @@ async function fetchTaiexDailyRows() {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+ 
 
+ 
 
 /* 近半年加權指數與櫃買報酬指數及均線 */
 async function loadMarketIndexCharts() {
@@ -1017,7 +1247,7 @@ async function loadMarketIndexCharts() {
 
  
 
-  /* 櫃買：保留 FinMind 日頻櫃買報酬指數 */
+  /* 櫃買：FinMind 日頻櫃買報酬指數 */
   if (otcResult.status === "fulfilled") {
     const otcData = otcResult.value;
 
@@ -1125,6 +1355,88 @@ async function loadMarketIndexCharts() {
  
 
  
+
+/* 讀取近半年 USD/TWD 每日參考匯率並繪圖 */
+async function loadFxChart() {
+  try {
+    const params = new URLSearchParams({
+      base: "USD",
+      quotes: "TWD",
+      from: sixMonthsAgo,
+      to: endDate
+    });
+
+ 
+
+    const url =
+      `https://api.frankfurter.dev/v2/rates?${params.toString()}`;
+
+ 
+
+    const response = await fetch(url, {
+      cache: "no-store"
+    });
+
+ 
+
+    if (!response.ok) {
+      throw new Error(`匯率 API HTTP ${response.status}`);
+    }
+
+ 
+
+    const data = await response.json();
+
+ 
+
+    if (!Array.isArray(data)) {
+      throw new Error("匯率 API 回傳格式不正確。");
+    }
+
+ 
+
+    const rows = data
+      .filter(row =>
+        row.base === "USD" &&
+        row.quote === "TWD" &&
+        row.date &&
+        Number.isFinite(Number(row.rate)) &&
+        Number(row.rate) > 0
+      )
+      .map(row => ({
+        date: row.date,
+        close: Number(row.rate)
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+ 
+
+    if (rows.length === 0) {
+      throw new Error("API 沒有回傳近半年的 USD/TWD 匯率資料。");
+    }
+
+ 
+
+    createPriceMaChart(
+      "fxChart",
+      rows,
+      "美元兌新臺幣（1 美元兌新臺幣）",
+      "NTD/USD"
+    );
+
+ 
+
+    $("fxNote").textContent =
+      "資料來源：Frankfurter 每日參考匯率｜單位：NTD/USD（非即時報價）";
+  } catch (error) {
+    console.error("匯率圖表讀取失敗：", error);
+
+ 
+
+    createEmptyChart("fxChart", "匯率資料讀取失敗");
+    $("fxNote").textContent = `讀取失敗：${error.message}`;
+  }
+}
 
 /* 讀取市場整體融資、融券及三大法人資料 */
 async function loadMarketCharts() {
@@ -2196,6 +2508,10 @@ async function loadStockCharts() {
       );
     }
 
+ 
+
+ 
+
     /* 整理近一年月營收 */
     const firstRevenue = item.revenues[0] || {};
 
@@ -2449,6 +2765,8 @@ $("refresh").addEventListener("click", async () => {
 
   try {
     await loadMarketIndexCharts();
+    await loadFxChart();
+    await loadMarketVolumeChart();
     await loadFuturesShortChart();
     await loadMarketCharts();
     await loadStockCharts();
@@ -2471,5 +2789,3 @@ $("refresh").addEventListener("click", async () => {
 </script>
 </body>
 </html>
-
-
